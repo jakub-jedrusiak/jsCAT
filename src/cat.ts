@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 import { minimize_Powell } from 'optimization-js';
-import { Stimulus, Zeta } from './type';
+import { Stimulus, Zeta, ZetaSymbolic } from './type';
 import { itemResponseFunction, fisherInformation, normal, uniform, findClosest } from './utils';
 import { validateZetaParams, fillZetaDefaults, ensureZetaNumericValues } from './corpus';
 import seedrandom from 'seedrandom';
@@ -18,6 +18,7 @@ export interface CatInput {
   priorDist?: string;
   priorPar?: number[];
   randomSeed?: string | null;
+  randomesque?: number;
 }
 
 export class Cat {
@@ -33,6 +34,7 @@ export class Cat {
   private _seMeasurement: number;
   public nStartItems: number;
   public startSelect: string;
+  public randomesque: number;
   private readonly _rng: ReturnType<seedrandom>;
   private _prior: [number, number][];
 
@@ -49,6 +51,7 @@ export class Cat {
    *     priorDist: the prior distribution type (applies to EAP and BME estimators)
    *     priorPar: the prior distribution parameters (applies to EAP and BME estimators)
    *     randomSeed: set a random seed to trace the simulation
+   *     randomesque: number of top items to randomly select from in MFI/closest (default = 1, i.e. always pick the best)
    */
 
   constructor({
@@ -62,6 +65,7 @@ export class Cat {
     priorDist = 'norm', // applies to EAP and BME estimators
     priorPar = priorDist === 'unif' ? [-4, 4] : [0, 1], // applies to EAP and BME estimators
     randomSeed = null,
+    randomesque = 1,
   }: CatInput = {}) {
     this.method = Cat.validateMethod(method);
 
@@ -78,6 +82,7 @@ export class Cat {
     this._theta = theta;
     this._seMeasurement = Number.MAX_VALUE;
     this.nStartItems = nStartItems;
+    this.randomesque = Math.max(1, Math.round(randomesque));
     this._rng = randomSeed === null ? seedrandom() : seedrandom(randomSeed);
     const validatedPrior =
       this.method === 'eap' || this.method === 'bme' ? Cat.validatePrior(priorDist, priorPar, minTheta, maxTheta) : [];
@@ -229,53 +234,100 @@ export class Cat {
   }
 
   private estimateAbilityBME() {
-    const theta0 = [0];
-    const solution = minimize_Powell(this.negLogPosterior.bind(this), theta0);
-    return solution.argument[0];
+    const dist = this.priorDist.toLowerCase();
+    let lo = this.minTheta;
+    let hi = this.maxTheta;
+
+    if (dist === 'unif') {
+      // For uniform prior, BME = MLE restricted to prior support
+      const [a, b] = this.priorPar;
+      lo = Math.max(lo, a);
+      hi = Math.min(hi, b);
+    }
+
+    return this.bisect((theta) => this.bmeEquation(theta), lo, hi);
   }
 
   private estimateAbilityWLE() {
-    const theta0 = [0];
-    const solution = minimize_Powell(this.negLogPosteriorJeffrey.bind(this), theta0);
-    return solution.argument[0];
+    return this.bisect((theta) => this.wleEquation(theta), this.minTheta, this.maxTheta);
   }
 
-  private logPrior(theta: number, jeffrey = false) {
-    if (jeffrey) {
-      if (this._zetas.length === 0) return 0;
-      const info = this._zetas.reduce((acc, zeta) => acc + fisherInformation(theta, zeta), 0);
-      const eps = 1e-12;
-      return 0.5 * Math.log(Math.max(info, eps));
+  /**
+   * Warm (1989) WLE score equation:
+   *   f(θ) = L'(θ) + Σ J_j(θ) / (2·Σ I_j(θ))
+   * where J_j = P'_j·P''_j/(P_j·Q_j) and I_j = P'_j²/(P_j·Q_j).
+   */
+  private wleEquation(theta: number): number {
+    let Lprime = 0;
+    let sumJi = 0;
+    let sumIi = 0;
+
+    for (let idx = 0; idx < this._zetas.length; idx++) {
+      const zeta = fillZetaDefaults(this._zetas[idx], 'symbolic') as ZetaSymbolic;
+      const { a, c, d } = zeta;
+      const P = itemResponseFunction(theta, zeta);
+      const Q = 1 - P;
+      const dP = a * (P - c) * (d - P) / (d - c);
+      const d2P = a * dP * (d - 2 * P + c) / (d - c);
+
+      Lprime += dP * (this._resps[idx] - P) / (P * Q);
+      sumJi += (dP * d2P) / (P * Q);
+      sumIi += (dP * dP) / (P * Q);
+    }
+
+    if (sumIi < 1e-12) return Lprime;
+    return Lprime + sumJi / (2 * sumIi);
+  }
+
+  /**
+   * BME score equation:
+   *   norm prior:  f(θ) = L'(θ) + (μ − θ)/σ²
+   *   unif prior:  f(θ) = L'(θ)          (i.e. MLE within bounds)
+   */
+  private bmeEquation(theta: number): number {
+    let Lprime = 0;
+
+    for (let idx = 0; idx < this._zetas.length; idx++) {
+      const zeta = fillZetaDefaults(this._zetas[idx], 'symbolic') as ZetaSymbolic;
+      const { a, c, d } = zeta;
+      const P = itemResponseFunction(theta, zeta);
+      const Q = 1 - P;
+      const dP = a * (P - c) * (d - P) / (d - c);
+      Lprime += dP * (this._resps[idx] - P) / (P * Q);
     }
 
     const dist = this.priorDist.toLowerCase();
-
     if (dist === 'norm') {
-      // priorPar = [mean, sd]
       const [mean, sd] = this.priorPar;
-      const z = (theta - mean) / sd;
-      return -0.5 * z * z - Math.log(sd);
+      return Lprime + (mean - theta) / (sd * sd);
     }
-
-    if (dist === 'unif') {
-      // priorPar = [minSupport, maxSupport]
-      const [a, b] = this.priorPar;
-      if (theta >= a && theta <= b) return 0;
-      const dist2boundary = theta < a ? a - theta : theta - b;
-      return -1e6 * dist2boundary;
-    }
-
-    throw new Error(`priorDist must be "unif" or "norm." Received ${this.priorDist} instead.`);
+    return Lprime;
   }
 
-  private negLogPosteriorJeffrey(thetaArray: Array<number>) {
-    const theta = thetaArray[0];
-    return -(this.likelihood(theta) + this.logPrior(theta, true));
-  }
+  /**
+   * Bisection root-finder for f(x) = 0 on [lo, hi].
+   */
+  private bisect(f: (x: number) => number, lo: number, hi: number): number {
+    let fLo = f(lo);
+    const fHi = f(hi);
 
-  private negLogPosterior(thetaArray: Array<number>) {
-    const theta = thetaArray[0];
-    return -(this.likelihood(theta) + this.logPrior(theta));
+    if (fLo * fHi > 0) {
+      return Math.abs(fLo) < Math.abs(fHi) ? lo : hi;
+    }
+
+    for (let i = 0; i < 200; i++) {
+      const mid = (lo + hi) / 2;
+      const fMid = f(mid);
+      if (Math.abs(fMid) < 1e-12 || (hi - lo) < 1e-12) return mid;
+      if (fMid * fLo < 0) {
+        hi = mid;
+      } else {
+        lo = mid;
+        fLo = fMid;
+      }
+    }
+
+    return (lo + hi) / 2;
   }
 
   private negLikelihood(thetaArray: Array<number>) {
@@ -348,13 +400,28 @@ export class Cat {
       ...element,
     }));
 
+    if (stimuliAddFisher.length === 0) {
+      return { nextStimulus: undefined as unknown as Stimulus, remainingStimuli: [] as Stimulus[] };
+    }
+
     stimuliAddFisher.sort((a, b) => b.fisherInformation - a.fisherInformation);
-    stimuliAddFisher.forEach((stimulus: Stimulus) => {
+
+    // Randomesque: pick randomly from the top-K items by Fisher information
+    const nrIt = Math.min(this.randomesque, stimuliAddFisher.length);
+    const threshold = stimuliAddFisher[nrIt - 1].fisherInformation;
+    const topK = stimuliAddFisher.filter((s) => s.fisherInformation >= threshold);
+    const pickIndex = this.randomInteger(0, topK.length - 1);
+    const picked = topK[pickIndex];
+
+    const remaining = stimuliAddFisher.filter((s) => s !== picked);
+    remaining.forEach((stimulus: Stimulus) => {
       delete stimulus['fisherInformation'];
     });
+    delete (picked as Stimulus)['fisherInformation'];
+
     return {
-      nextStimulus: stimuliAddFisher[0],
-      remainingStimuli: stimuliAddFisher.slice(1).sort((a: Stimulus, b: Stimulus) => a.difficulty! - b.difficulty!),
+      nextStimulus: picked as Stimulus,
+      remainingStimuli: remaining.sort((a: Stimulus, b: Stimulus) => a.difficulty! - b.difficulty!),
     };
   }
 
@@ -376,9 +443,21 @@ export class Cat {
 
   private selectorClosest(arr: Stimulus[]) {
     //findClosest requires arr is sorted by difficulty
-    const index = findClosest(arr, this._theta + 0.481);
-    const nextItem = arr[index];
-    arr.splice(index, 1);
+    if (arr.length === 0) {
+      return { nextStimulus: undefined as unknown as Stimulus, remainingStimuli: [] as Stimulus[] };
+    }
+    // Compute distances from target for randomesque support
+    const target = this._theta + 0.481;
+    const distances = arr.map((s, i) => ({ index: i, dist: Math.abs(s.difficulty! - target) }));
+    distances.sort((a, b) => a.dist - b.dist);
+
+    const nrIt = Math.min(this.randomesque, distances.length);
+    const threshold = distances[nrIt - 1].dist;
+    const topK = distances.filter((d) => d.dist <= threshold);
+    const pick = topK[this.randomInteger(0, topK.length - 1)];
+
+    const nextItem = arr[pick.index];
+    arr.splice(pick.index, 1);
     return {
       nextStimulus: nextItem,
       remainingStimuli: arr,

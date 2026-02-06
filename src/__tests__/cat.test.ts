@@ -228,15 +228,15 @@ for (const format of ['symbolic', 'semantic'] as Array<'symbolic' | 'semantic'>)
     });
 
     it('correctly updates ability estimate through BME (unif prior)', () => {
-      expect(cat11.theta).toBeCloseTo(-1.035, 2);
+      expect(cat11.theta).toBeCloseTo(-1.092, 2);
     });
 
     it('correctly updates ability estimate through WLE', () => {
-      expect(cat12.theta).toBeCloseTo(-4.69, 1);
+      expect(cat12.theta).toBeCloseTo(-5.29, 1);
     });
 
     it('correctly updates ability estimate through WLE with mixed responses', () => {
-      expect(cat13.theta).toBeCloseTo(-1.783, 1);
+      expect(cat13.theta).toBeCloseTo(-1.833, 1);
     });
 
     it('BME norm estimate is between MLE and prior mean', () => {
@@ -267,7 +267,7 @@ for (const format of ['symbolic', 'semantic'] as Array<'symbolic' | 'semantic'>)
       cat10.updateAbilityEstimate(easyItem, 1);
 
       expect(cat10.theta).toBeGreaterThan(thetaBefore);
-      expect(cat10.theta).toBeCloseTo(-1.528, 2);
+      expect(cat10.theta).toBeCloseTo(-1.53, 2);
     });
 
     it('should reduce theta estimate when given incorrect response to easy item using EAP (unif)', () => {
@@ -587,5 +587,129 @@ describe('Cat.validatePrior with BME', () => {
     expect(() => {
       new Cat({ method: 'bme', priorDist: 'invalid' as unknown as string, priorPar: [0, 1] });
     }).toThrowError('priorDist must be "unif" or "norm." Received invalid instead.');
+  });
+});
+
+describe('Randomesque item selection', () => {
+  // 10 items with a=1, c=0, d=1 and varying difficulty
+  // Fisher info at theta=0: item5 (b=0) = 0.25, item4 (b=-0.5) = item6 (b=0.5) = 0.235, etc.
+  const items: Stimulus[] = [
+    { discrimination: 1, difficulty: -2.0, guessing: 0, slipping: 1 },
+    { discrimination: 1, difficulty: -1.5, guessing: 0, slipping: 1 },
+    { discrimination: 1, difficulty: -1.0, guessing: 0, slipping: 1 },
+    { discrimination: 1, difficulty: -0.5, guessing: 0, slipping: 1 },
+    { discrimination: 1, difficulty: 0.0, guessing: 0, slipping: 1 },
+    { discrimination: 1, difficulty: 0.5, guessing: 0, slipping: 1 },
+    { discrimination: 1, difficulty: 1.0, guessing: 0, slipping: 1 },
+    { discrimination: 1, difficulty: 1.5, guessing: 0, slipping: 1 },
+    { discrimination: 1, difficulty: 2.0, guessing: 0, slipping: 1 },
+    { discrimination: 1, difficulty: 2.5, guessing: 0, slipping: 1 },
+  ];
+
+  it('defaults randomesque to 1', () => {
+    const cat = new Cat();
+    expect(cat.randomesque).toBe(1);
+  });
+
+  it('stores and rounds randomesque', () => {
+    const cat = new Cat({ randomesque: 3 });
+    expect(cat.randomesque).toBe(3);
+  });
+
+  it('rounds fractional randomesque up', () => {
+    const cat = new Cat({ randomesque: 2.7 });
+    expect(cat.randomesque).toBe(3);
+  });
+
+  it('clamps randomesque to at least 1', () => {
+    const cat = new Cat({ randomesque: 0 });
+    expect(cat.randomesque).toBe(1);
+    const cat2 = new Cat({ randomesque: -5 });
+    expect(cat2.randomesque).toBe(1);
+  });
+
+  it('randomesque=1 MFI always picks the best item (b=0 at theta=0)', () => {
+    const cat = new Cat({ nStartItems: 0, randomesque: 1, randomSeed: 'abc' });
+    // theta defaults to 0; best Fisher info at theta=0 is b=0 (item index 4)
+    const result = cat.findNextItem([...items], 'mfi');
+    expect(result.nextStimulus!.difficulty).toBe(0.0);
+    expect(result.remainingStimuli.length).toBe(9);
+  });
+
+  it('randomesque=3 MFI picks from top-3 items', () => {
+    // Top-3 Fisher info at theta=0: b=0 (0.25), b=-0.5 (0.235), b=0.5 (0.235)
+    const selectedDifficulties = new Set<number>();
+    for (let seed = 0; seed < 50; seed++) {
+      const cat = new Cat({ nStartItems: 0, randomesque: 3, randomSeed: `seed${seed}` });
+      const result = cat.findNextItem([...items], 'mfi');
+      selectedDifficulties.add(result.nextStimulus!.difficulty!);
+    }
+    // All selected items should be among the top-3
+    selectedDifficulties.forEach((d) => {
+      expect([-0.5, 0.0, 0.5]).toContain(d);
+    });
+    // With 50 different seeds we should see more than 1 distinct item (demonstrating randomness)
+    expect(selectedDifficulties.size).toBeGreaterThan(1);
+  });
+
+  it('randomesque=1 closest always picks the single closest item', () => {
+    const cat = new Cat({ nStartItems: 0, randomesque: 1, randomSeed: 'abc' });
+    // theta=0, target=0+0.481=0.481, closest item is b=0.5
+    const result = cat.findNextItem([...items], 'closest');
+    expect(result.nextStimulus!.difficulty).toBe(0.5);
+  });
+
+  it('randomesque=3 closest picks from top-3 closest items', () => {
+    // theta=0, target=0.481. Distances: b=0.5: 0.019, b=0.0: 0.481, b=1.0: 0.519, b=-0.5: 0.981, ...
+    const selectedDifficulties = new Set<number>();
+    for (let seed = 0; seed < 50; seed++) {
+      const cat = new Cat({ nStartItems: 0, randomesque: 3, randomSeed: `seed${seed}` });
+      const result = cat.findNextItem([...items], 'closest');
+      selectedDifficulties.add(result.nextStimulus!.difficulty!);
+    }
+    // Top-3 closest to target=0.481: b=0.5, b=0.0, b=1.0
+    selectedDifficulties.forEach((d) => {
+      expect([0.0, 0.5, 1.0]).toContain(d);
+    });
+    expect(selectedDifficulties.size).toBeGreaterThan(1);
+  });
+
+  it('randomesque larger than item count picks from all items', () => {
+    const cat = new Cat({ nStartItems: 0, randomesque: 100, randomSeed: 'big' });
+    const result = cat.findNextItem([...items], 'mfi');
+    // Should not crash and should pick some item
+    expect(items.map((i) => i.difficulty)).toContain(result.nextStimulus!.difficulty);
+  });
+
+  it('randomesque does not affect random selector', () => {
+    // The random selector should ignore randomesque
+    const cat = new Cat({ nStartItems: 0, itemSelect: 'RANDOM', randomSeed: 'r1', randomesque: 3 });
+    const result = cat.findNextItem([...items]);
+    expect(items.map((i) => i.difficulty)).toContain(result.nextStimulus!.difficulty);
+  });
+
+  it('MFI handles ties correctly with randomesque', () => {
+    // For a=1, c=0, d=1 items at theta=0: b=-0.5 and b=0.5 have identical Fisher info
+    // With randomesque=2, top-2 are b=0 (best) and the threshold is the 2nd-best value,
+    // which ties between b=-0.5 and b=0.5 — all three should be eligible
+    const selectedDifficulties = new Set<number>();
+    for (let seed = 0; seed < 50; seed++) {
+      const cat = new Cat({ nStartItems: 0, randomesque: 2, randomSeed: `tie${seed}` });
+      const result = cat.findNextItem([...items], 'mfi');
+      selectedDifficulties.add(result.nextStimulus!.difficulty!);
+    }
+    // Top item: b=0 (FI=0.25), 2nd position could be b=-0.5 or b=0.5 (both FI=0.235)
+    // Threshold would be FI at position 2 = 0.235, so all three (b=0, b=-0.5, b=0.5) qualify
+    selectedDifficulties.forEach((d) => {
+      expect([-0.5, 0.0, 0.5]).toContain(d);
+    });
+  });
+
+  it('remaining stimuli are correctly returned with randomesque', () => {
+    const cat = new Cat({ nStartItems: 0, randomesque: 3, randomSeed: 'rem' });
+    const result = cat.findNextItem([...items], 'mfi');
+    expect(result.remainingStimuli.length).toBe(9);
+    // The remaining stimuli should not contain the selected item
+    expect(result.remainingStimuli).not.toContainEqual(result.nextStimulus);
   });
 });
