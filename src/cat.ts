@@ -39,15 +39,15 @@ export class Cat {
   /**
    * Create a Cat object. This expects an single object parameter with the following keys
    * @param {{method: string, itemSelect: string, nStartItems: number, startSelect:string, theta: number, minTheta: number, maxTheta: number, priorDist: string, priorPar: number[]}=} destructuredParam
-   *     method: ability estimator, e.g. MLE or EAP, default = 'MLE'
+   *     method: ability estimator, e.g. MLE, WLE, BME (aka MAP), or EAP, default = 'MLE'
    *     itemSelect: the method of item selection, e.g. "MFI", "random", "closest", default method = 'MFI'
    *     nStartItems: first n trials to keep non-adaptive selection
    *     startSelect: rule to select first n trials
    *     theta: initial theta estimate
    *     minTheta: lower bound of theta
    *     maxTheta: higher bound of theta
-   *     priorDist: the prior distribution type (only applies to EAP estimator)
-   *     priorPar: the prior distribution parameters (only applies to EAP estimator)
+   *     priorDist: the prior distribution type (applies to EAP and BME estimators)
+   *     priorPar: the prior distribution parameters (applies to EAP and BME estimators)
    *     randomSeed: set a random seed to trace the simulation
    */
 
@@ -59,8 +59,8 @@ export class Cat {
     theta = 0,
     minTheta = -6,
     maxTheta = 6,
-    priorDist = 'norm', // only applies to EAP estimator
-    priorPar = priorDist === 'unif' ? [-4, 4] : [0, 1], // only applies to EAP estimator
+    priorDist = 'norm', // applies to EAP and BME estimators
+    priorPar = priorDist === 'unif' ? [-4, 4] : [0, 1], // applies to EAP and BME estimators
     randomSeed = null,
   }: CatInput = {}) {
     this.method = Cat.validateMethod(method);
@@ -79,7 +79,9 @@ export class Cat {
     this._seMeasurement = Number.MAX_VALUE;
     this.nStartItems = nStartItems;
     this._rng = randomSeed === null ? seedrandom() : seedrandom(randomSeed);
-    this._prior = this.method === 'eap' ? Cat.validatePrior(priorDist, priorPar, minTheta, maxTheta) : [];
+    const validatedPrior =
+      this.method === 'eap' || this.method === 'bme' ? Cat.validatePrior(priorDist, priorPar, minTheta, maxTheta) : [];
+    this._prior = this.method === 'eap' ? validatedPrior : [];
   }
 
   public get theta() {
@@ -145,8 +147,9 @@ export class Cat {
   }
 
   private static validateMethod(method: string) {
-    const lowerMethod = method.toLowerCase();
-    const validMethods: Array<string> = ['mle', 'eap']; // TO DO: add staircase
+    const lower = method.toLowerCase();
+    const lowerMethod = lower === 'map' ? 'bme' : lower;
+    const validMethods: Array<string> = ['mle', 'eap', 'bme', 'wle']; // TO DO: add staircase
     if (!validMethods.includes(lowerMethod)) {
       throw new Error('The abilityEstimator you provided is not in the list of valid methods');
     }
@@ -197,6 +200,10 @@ export class Cat {
       this._theta = this.estimateAbilityEAP();
     } else if (method === 'mle') {
       this._theta = this.estimateAbilityMLE();
+    } else if (method === 'bme') {
+      this._theta = this.estimateAbilityBME();
+    } else if (method === 'wle') {
+      this._theta = this.estimateAbilityWLE();
     }
     this._theta = _clamp(this._theta, this.minTheta, this.maxTheta);
     this.calculateSE();
@@ -219,6 +226,56 @@ export class Cat {
     const solution = minimize_Powell(this.negLikelihood.bind(this), theta0);
     const theta = solution.argument[0];
     return theta;
+  }
+
+  private estimateAbilityBME() {
+    const theta0 = [0];
+    const solution = minimize_Powell(this.negLogPosterior.bind(this), theta0);
+    return solution.argument[0];
+  }
+
+  private estimateAbilityWLE() {
+    const theta0 = [0];
+    const solution = minimize_Powell(this.negLogPosteriorJeffrey.bind(this), theta0);
+    return solution.argument[0];
+  }
+
+  private logPrior(theta: number, jeffrey = false) {
+    if (jeffrey) {
+      if (this._zetas.length === 0) return 0;
+      const info = this._zetas.reduce((acc, zeta) => acc + fisherInformation(theta, zeta), 0);
+      const eps = 1e-12;
+      return 0.5 * Math.log(Math.max(info, eps));
+    }
+
+    const dist = this.priorDist.toLowerCase();
+
+    if (dist === 'norm') {
+      // priorPar = [mean, sd]
+      const [mean, sd] = this.priorPar;
+      const z = (theta - mean) / sd;
+      return -0.5 * z * z - Math.log(sd);
+    }
+
+    if (dist === 'unif') {
+      // priorPar = [minSupport, maxSupport]
+      const [a, b] = this.priorPar;
+      if (theta >= a && theta <= b) return 0;
+      const dist2boundary = theta < a ? a - theta : theta - b;
+      return -1e6 * dist2boundary;
+    }
+
+    throw new Error(`priorDist must be "unif" or "norm." Received ${this.priorDist} instead.`);
+  }
+
+  private negLogPosteriorJeffrey(thetaArray: Array<number>) {
+    const theta = thetaArray[0];
+    return -(this.likelihood(theta) + this.logPrior(theta, true));
+  }
+
+  private negLogPosterior(thetaArray: Array<number>) {
+    const theta = thetaArray[0];
+    return -(this.likelihood(theta) + this.logPrior(theta));
   }
 
   private negLikelihood(thetaArray: Array<number>) {

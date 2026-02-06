@@ -6,7 +6,19 @@ import { convertZeta } from '../corpus';
 
 for (const format of ['symbolic', 'semantic'] as Array<'symbolic' | 'semantic'>) {
   describe(`Cat with ${format} zeta`, () => {
-    let cat1: Cat, cat2: Cat, cat3: Cat, cat4: Cat, cat5: Cat, cat6: Cat, cat7: Cat, cat8: Cat, cat9: Cat;
+    let cat1: Cat,
+      cat2: Cat,
+      cat3: Cat,
+      cat4: Cat,
+      cat5: Cat,
+      cat6: Cat,
+      cat7: Cat,
+      cat8: Cat,
+      cat9: Cat,
+      cat10: Cat,
+      cat11: Cat,
+      cat12: Cat,
+      cat13: Cat;
     let rng = seedrandom();
 
     beforeEach(() => {
@@ -57,6 +69,38 @@ for (const format of ['symbolic', 'semantic'] as Array<'symbolic' | 'semantic'>)
       cat9.updateAbilityEstimate(
         [convertZeta({ a: 1, b: -4.0, c: 0.5, d: 1 }, format), convertZeta({ a: 1, b: -3.0, c: 0.5, d: 1 }, format)],
         [0, 0],
+      );
+
+      // BME (norm prior) with same items as cat6/cat7
+      cat10 = new Cat({ method: 'bme', priorDist: 'norm', priorPar: [0, 1] });
+      cat10.updateAbilityEstimate(
+        [convertZeta({ a: 1, b: -4.0, c: 0.5, d: 1 }, format), convertZeta({ a: 1, b: -3.0, c: 0.5, d: 1 }, format)],
+        [0, 0],
+      );
+
+      // BME (unif prior) with mixed responses
+      cat11 = new Cat({ method: 'bme', priorDist: 'unif', priorPar: [-4, 4], minTheta: -6, maxTheta: 6 });
+      cat11.updateAbilityEstimate(
+        [convertZeta({ a: 1, b: -0.5, c: 0.5, d: 1 }, format), convertZeta({ a: 1, b: 0.5, c: 0.5, d: 1 }, format)],
+        [1, 0],
+      );
+
+      // WLE with same items as cat6/cat7
+      cat12 = new Cat({ method: 'wle' });
+      cat12.updateAbilityEstimate(
+        [convertZeta({ a: 1, b: -4.0, c: 0.5, d: 1 }, format), convertZeta({ a: 1, b: -3.0, c: 0.5, d: 1 }, format)],
+        [0, 0],
+      );
+
+      // WLE with same items as cat1
+      cat13 = new Cat({ method: 'wle' });
+      cat13.updateAbilityEstimate(
+        [
+          convertZeta({ a: 2.225, b: -1.885, c: 0.21, d: 1 }, format),
+          convertZeta({ a: 1.174, b: -2.411, c: 0.212, d: 1 }, format),
+          convertZeta({ a: 2.104, b: -2.439, c: 0.192, d: 1 }, format),
+        ],
+        [1, 0, 1],
       );
     });
 
@@ -179,6 +223,33 @@ for (const format of ['symbolic', 'semantic'] as Array<'symbolic' | 'semantic'>)
       expect(cat7.theta).toBeCloseTo(-1.649, 2);
     });
 
+    it('correctly updates ability estimate through BME (norm prior)', () => {
+      expect(cat10.theta).toBeCloseTo(-1.693, 2);
+    });
+
+    it('correctly updates ability estimate through BME (unif prior)', () => {
+      expect(cat11.theta).toBeCloseTo(-1.035, 2);
+    });
+
+    it('correctly updates ability estimate through WLE', () => {
+      expect(cat12.theta).toBeCloseTo(-4.69, 1);
+    });
+
+    it('correctly updates ability estimate through WLE with mixed responses', () => {
+      expect(cat13.theta).toBeCloseTo(-1.783, 1);
+    });
+
+    it('BME norm estimate is between MLE and prior mean', () => {
+      // MLE (cat6) = -6.0, prior mean = 0, BME should be in between
+      expect(cat10.theta).toBeGreaterThan(cat6.theta);
+      expect(cat10.theta).toBeLessThan(0);
+    });
+
+    it('WLE estimate is less extreme than MLE for all-wrong responses', () => {
+      // WLE corrects for MLE bias, so it should be less extreme
+      expect(cat12.theta).toBeGreaterThan(cat6.theta);
+    });
+
     it('should reduce theta estimate when given incorrect response to easy item using EAP (norm)', () => {
       const easyItem = convertZeta({ a: 1, b: -2.5, c: 0.2, d: 1 }, format);
 
@@ -187,6 +258,16 @@ for (const format of ['symbolic', 'semantic'] as Array<'symbolic' | 'semantic'>)
 
       // Theta should increase since we got a correct response to an easy item
       expect(cat7.theta).toBeCloseTo(-1.486, 2);
+    });
+
+    it('should increase theta estimate when given correct response to easy item using BME (norm)', () => {
+      const thetaBefore = cat10.theta;
+      const easyItem = convertZeta({ a: 1, b: -2.5, c: 0.2, d: 1 }, format);
+
+      cat10.updateAbilityEstimate(easyItem, 1);
+
+      expect(cat10.theta).toBeGreaterThan(thetaBefore);
+      expect(cat10.theta).toBeCloseTo(-1.528, 2);
     });
 
     it('should reduce theta estimate when given incorrect response to easy item using EAP (unif)', () => {
@@ -239,6 +320,21 @@ for (const format of ['symbolic', 'semantic'] as Array<'symbolic' | 'semantic'>)
       const priorXValues = cat.prior.map((p) => p[0]);
       expect(Math.min(...priorXValues)).toBeGreaterThanOrEqual(-3);
       expect(Math.max(...priorXValues)).toBeLessThanOrEqual(3);
+    });
+
+    it('should accept MAP as alias for BME', () => {
+      const cat = new Cat({ method: 'MAP', priorDist: 'norm', priorPar: [0, 1] });
+      expect(cat.method).toBe('bme');
+    });
+
+    it('should accept WLE as a valid method', () => {
+      const cat = new Cat({ method: 'wle' });
+      expect(cat.method).toBe('wle');
+    });
+
+    it('should accept BME as a valid method', () => {
+      const cat = new Cat({ method: 'bme', priorDist: 'norm', priorPar: [0, 1] });
+      expect(cat.method).toBe('bme');
     });
 
     it('should throw an error if method is invalid', () => {
@@ -443,6 +539,53 @@ describe('Cat.validatePrior', () => {
         priorDist: 'invalid' as unknown as string,
         priorPar: [5, 10],
       });
+    }).toThrowError('priorDist must be "unif" or "norm." Received invalid instead.');
+  });
+});
+
+describe('Cat.validatePrior with BME', () => {
+  it('should validate prior parameters when method is BME', () => {
+    expect(() => {
+      new Cat({ method: 'bme', priorDist: 'norm', priorPar: [0, -1] });
+    }).toThrow('Expected a positive prior distribution standard deviation. Received -1');
+  });
+
+  it('should throw an error for BME with invalid priorPar length', () => {
+    expect(() => {
+      new Cat({ method: 'bme', priorDist: 'norm', priorPar: [0] });
+    }).toThrow('The prior distribution parameters should be an array of two numbers. Received 0.');
+  });
+
+  it('should throw an error for BME with mean outside theta bounds', () => {
+    expect(() => {
+      new Cat({ method: 'bme', priorDist: 'norm', priorPar: [10, 1], minTheta: -6, maxTheta: 6 });
+    }).toThrow(
+      'Expected the prior distribution mean to be between the min and max theta. Received mean: 10, min: -6, max: 6',
+    );
+  });
+
+  it('should accept valid BME with norm prior', () => {
+    expect(() => {
+      new Cat({ method: 'bme', priorDist: 'norm', priorPar: [0, 1] });
+    }).not.toThrow();
+  });
+
+  it('should accept valid BME with unif prior', () => {
+    expect(() => {
+      new Cat({ method: 'bme', priorDist: 'unif', priorPar: [-2, 2] });
+    }).not.toThrow();
+  });
+
+  it('should not validate prior parameters for WLE', () => {
+    // WLE uses Jeffreys prior (data-dependent), not priorDist/priorPar
+    expect(() => {
+      new Cat({ method: 'wle', priorDist: 'norm', priorPar: [0, -1] });
+    }).not.toThrow();
+  });
+
+  it('should throw error for BME with invalid priorDist', () => {
+    expect(() => {
+      new Cat({ method: 'bme', priorDist: 'invalid' as unknown as string, priorPar: [0, 1] });
     }).toThrowError('priorDist must be "unif" or "norm." Received invalid instead.');
   });
 });
