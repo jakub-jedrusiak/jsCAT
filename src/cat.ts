@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 import { minimize_Powell } from 'optimization-js';
 import { Stimulus, Zeta } from './type';
-import { itemResponseFunction, fisherInformation, normal, uniform, findClosest } from './utils';
+import { itemResponseFunction, fisherInformation, normal, uniform } from './utils';
 import { validateZetaParams, fillZetaDefaults, ensureZetaNumericValues } from './corpus';
 import seedrandom from 'seedrandom';
 import _clamp from 'lodash/clamp';
@@ -51,7 +51,7 @@ export class Cat {
    *     priorDist: the prior distribution type (only applies to EAP estimator)
    *     priorPar: the prior distribution parameters (only applies to EAP estimator)
    *     randomSeed: set a random seed to trace the simulation
-   *     randomesque: number of best items to randomly select from (default = 1)
+   *     randomesque: number of top items to randomly select from in MFI/closest (default = 1, i.e. always pick the best)
    */
 
   constructor({
@@ -77,12 +77,12 @@ export class Cat {
     this.maxTheta = maxTheta;
     this.priorDist = priorDist;
     this.priorPar = priorPar;
-    this.randomesque = randomesque;
     this._zetas = [];
     this._resps = [];
     this._theta = theta;
     this._seMeasurement = Number.MAX_VALUE;
     this.nStartItems = nStartItems;
+    this.randomesque = Math.max(1, Math.round(randomesque));
     this._rng = randomSeed === null ? seedrandom() : seedrandom(randomSeed);
     this._prior = this.method === 'eap' ? Cat.validatePrior(priorDist, priorPar, minTheta, maxTheta) : [];
   }
@@ -252,15 +252,9 @@ export class Cat {
    * @param stimuli - an array of stimulus
    * @param itemSelect - the item selection method
    * @param deepCopy - default deepCopy = true
-   * @param randomesque - number of best items to choose from (default = 1)
    * @returns {nextStimulus: Stimulus, remainingStimuli: Array<Stimulus>}
    */
-  public findNextItem(
-    stimuli: Stimulus[],
-    itemSelect: string = this.itemSelect,
-    deepCopy = true,
-    randomesque: number = this.randomesque,
-  ) {
+  public findNextItem(stimuli: Stimulus[], itemSelect: string = this.itemSelect, deepCopy = true) {
     let arr: Array<Stimulus>;
     let selector = Cat.validateItemSelect(itemSelect);
     if (deepCopy) {
@@ -283,36 +277,57 @@ export class Cat {
 
     if (selector === 'middle') {
       // middle will only be used in startSelect
-      return this.selectorMiddle(arr, randomesque);
+      return this.selectorMiddle(arr);
     } else if (selector === 'closest') {
-      return this.selectorClosest(arr, randomesque);
+      return this.selectorClosest(arr);
     } else if (selector === 'random') {
       return this.selectorRandom(arr);
     } else if (selector === 'fixed') {
       return this.selectorFixed(arr);
     } else {
-      return this.selectorMFI(arr, randomesque);
+      return this.selectorMFI(arr);
     }
   }
 
-  /**
-   * select a random item from a window centered on the given index
-   * used by selectors that pick from N best candidates
-   */
-  private selectFromWindow(arr: Stimulus[], centerIndex: number, windowSize: number) {
-    const halfWindow = Math.floor(windowSize / 2);
-    let startIndex = centerIndex - halfWindow;
-    if (startIndex < 0) {
-      startIndex = 0;
+  private selectorMFI(inputStimuli: Stimulus[]) {
+    const stimuli = inputStimuli.map((stim) => fillZetaDefaults(stim, 'semantic'));
+    const stimuliAddFisher = stimuli.map((element: Stimulus) => ({
+      fisherInformation: fisherInformation(this._theta, fillZetaDefaults(element, 'symbolic')),
+      ...element,
+    }));
+
+    if (stimuliAddFisher.length === 0) {
+      return { nextStimulus: undefined as unknown as Stimulus, remainingStimuli: [] as Stimulus[] };
     }
 
-    const maxStartIndex = arr.length - windowSize;
-    if (startIndex > maxStartIndex) {
-      startIndex = maxStartIndex;
-    }
+    stimuliAddFisher.sort((a, b) => b.fisherInformation - a.fisherInformation);
 
-    const endIndex = startIndex + windowSize - 1;
-    const index = this.randomInteger(startIndex, endIndex);
+    // Randomesque: pick randomly from the top-K items by Fisher information
+    const nrIt = Math.min(this.randomesque, stimuliAddFisher.length);
+    const threshold = stimuliAddFisher[nrIt - 1].fisherInformation;
+    const topK = stimuliAddFisher.filter((s) => s.fisherInformation >= threshold);
+    const pickIndex = this.randomInteger(0, topK.length - 1);
+    const picked = topK[pickIndex];
+
+    const remaining = stimuliAddFisher.filter((s) => s !== picked);
+    remaining.forEach((stimulus: Stimulus) => {
+      delete stimulus['fisherInformation'];
+    });
+    delete (picked as Stimulus)['fisherInformation'];
+
+    return {
+      nextStimulus: picked as Stimulus,
+      remainingStimuli: remaining.sort((a: Stimulus, b: Stimulus) => a.difficulty! - b.difficulty!),
+    };
+  }
+
+  private selectorMiddle(arr: Stimulus[]) {
+    let index: number;
+    index = Math.floor(arr.length / 2);
+
+    if (arr.length >= this.nStartItems) {
+      index += this.randomInteger(-Math.floor(this.nStartItems / 2), Math.floor(this.nStartItems / 2));
+    }
 
     const nextItem = arr[index];
     arr.splice(index, 1);
@@ -322,41 +337,27 @@ export class Cat {
     };
   }
 
-  private selectorMFI(inputStimuli: Stimulus[], randomesque: number) {
-    const stimuli = inputStimuli.map((stim) => fillZetaDefaults(stim, 'semantic'));
-    const stimuliAddFisher = stimuli.map((element: Stimulus) => ({
-      fisherInformation: fisherInformation(this._theta, fillZetaDefaults(element, 'symbolic')),
-      ...element,
-    }));
-
-    stimuliAddFisher.sort((a, b) => b.fisherInformation - a.fisherInformation);
-    stimuliAddFisher.forEach((stimulus: Stimulus) => {
-      delete stimulus['fisherInformation'];
-    });
-
-    const windowSize = Math.min(randomesque, stimuliAddFisher.length);
-    const result = this.selectFromWindow(stimuliAddFisher, 0, windowSize);
-
-    const remainingStimuli = result.remainingStimuli.sort((a, b) => a.difficulty! - b.difficulty!);
-    return { nextStimulus: result.nextStimulus, remainingStimuli };
-  }
-
-  private selectorMiddle(arr: Stimulus[], randomesque: number) {
-    const middleIndex = Math.floor(arr.length / 2);
-
-    let windowSize = Math.min(Math.max(randomesque, 1), arr.length);
-    if (arr.length >= this.nStartItems && this.nStartItems > 0) {
-      windowSize = Math.min(Math.max(windowSize, this.nStartItems), arr.length);
+  private selectorClosest(arr: Stimulus[]) {
+    //findClosest requires arr is sorted by difficulty
+    if (arr.length === 0) {
+      return { nextStimulus: undefined as unknown as Stimulus, remainingStimuli: [] as Stimulus[] };
     }
+    // Compute distances from target for randomesque support
+    const target = this._theta + 0.481;
+    const distances = arr.map((s, i) => ({ index: i, dist: Math.abs(s.difficulty! - target) }));
+    distances.sort((a, b) => a.dist - b.dist);
 
-    return this.selectFromWindow(arr, middleIndex, windowSize);
-  }
+    const nrIt = Math.min(this.randomesque, distances.length);
+    const threshold = distances[nrIt - 1].dist;
+    const topK = distances.filter((d) => d.dist <= threshold);
+    const pick = topK[this.randomInteger(0, topK.length - 1)];
 
-  private selectorClosest(arr: Stimulus[], randomesque: number) {
-    // findClosest requires arr is sorted by difficulty
-    const closestIndex = findClosest(arr, this._theta + 0.481);
-    const windowSize = Math.min(randomesque, arr.length);
-    return this.selectFromWindow(arr, closestIndex, windowSize);
+    const nextItem = arr[pick.index];
+    arr.splice(pick.index, 1);
+    return {
+      nextStimulus: nextItem,
+      remainingStimuli: arr,
+    };
   }
 
   private selectorRandom(arr: Stimulus[]) {
